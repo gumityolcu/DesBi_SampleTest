@@ -47,34 +47,48 @@ class RepresenterPoints(DualDA):
         l2 = weights.square().sum()
         return self.lmbd * l2 + phi / features.shape[0], phi, l2
 
-    def _backtracking_step(self, features, targets, weights, grad, loss):
+    def backtracking_line_search(self, features, targets, weights, grad, loss):
         step = self.initial_step
         grad_norm_sq = grad.square().sum()
 
         while step >= self.min_step:
             candidate = weights - step * grad
             candidate_loss, _, _ = self._objective(features, targets, candidate)
-            if candidate_loss - loss + step * grad_norm_sq / 2 < 0:
+            if candidate_loss - loss + step * grad_norm_sq / 2 < 0: # Check sufficient decrease on backtracking line search
                 return candidate.detach()
             step *= self.line_search_beta
 
         return weights.detach()
 
+    def _model_targets(self):
+        targets = []
+        loader = torch.utils.data.DataLoader(self.dataset, batch_size=32)
+
+        with torch.no_grad():
+            for x, _ in loader:
+                logits = self.model(x.to(self.device))
+                targets.append(torch.softmax(logits, dim=1))
+
+        return torch.cat(targets, dim=0).to(self.device).float()
+
+    def _initial_weights(self, num_features, num_classes):
+        final_layer = dict(self.model.named_modules()).get(self.classifier, None)
+        if final_layer is not None and hasattr(final_layer, "weight"):
+            weights = final_layer.weight.detach().to(self.device).float()
+            if weights.shape == (num_classes, num_features):
+                return weights.T.clone()
+
+        return torch.zeros(num_features, num_classes, device=self.device)
+
     def train(self):
         tstart = time.time()
-        classifier = dict(self.model.named_modules()).get(self.classifier, None)
-        if classifier is None:
-            raise ValueError(f"Layer '{self.classifier}' not found in model.")
-        if not hasattr(classifier, "weight"):
-            raise ValueError(
-                "Representer points require a classifier layer with a weight matrix."
-            )
-
         features = self.samples.detach().to(self.device).float()
-        with torch.no_grad():
-            targets = torch.softmax(classifier(features), dim=1)
+        targets = self._model_targets()
 
-        weights = classifier.weight.detach().T.to(self.device).float().clone()
+        weights = self._initial_weights(
+            num_features=features.shape[1],
+            num_classes=targets.shape[1],
+        )
         best_weights = weights.clone()
         min_grad = None
         initial_grad = None
@@ -108,7 +122,7 @@ class RepresenterPoints(DualDA):
                     )
                 )
 
-            weights = self._backtracking_step(
+            weights = self.backtracking_line_search(
                 features=features,
                 targets=targets,
                 weights=weights.detach(),
@@ -157,3 +171,6 @@ class RepresenterPoints(DualDA):
             os.path.join(self.cache_dir, self.name, "train_time"),
         )
         return self.train_time
+
+
+RepresenterPointsExplainer = RepresenterPoints
